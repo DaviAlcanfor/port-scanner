@@ -2,6 +2,9 @@
 
 A fast, async TCP port scanner built in Rust. Scans one or multiple hosts, shows a real-time progress bar, and prints results with colored output.
 
+> ⚠️ **Educational Project** — This tool was built for learning purposes (networking, Rust, async programming). Only use it against hosts you own or have explicit permission to scan. Unauthorized scanning may violate local laws.
+
+
 ## Features
 
 - Async scanning via Tokio — no thread-per-port overhead
