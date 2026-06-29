@@ -1,82 +1,42 @@
+mod cli;
+use cli::Args;
 use clap::Parser;
-use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
+use std::fs;
+
+mod probe;
+use probe::probe;
+
 use futures::stream::{self, StreamExt};
-use std::sync::Arc;
-use tracing::error;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::sync::Arc;
+use tokio::time::Duration;
+use tracing::error;
 
-
-
-
-#[derive(Parser, Debug)]
-#[command(version, about, about = "Fast TCP port scanner made in Rust")]
-struct Args {
-    
-    #[arg(long, help = "Target IP or hostname")]
-    host: String,
-    
-    #[arg(long, default_value_t = 200, help = "Timeout in ms between ports")]
-    timeout: u64,
-
-    #[arg(long, default_value_t = 1, help = "Number of concurrent tasks by thread")]
-    threads: u16,
-
-    #[arg(long, default_value = "1-1024", help = "Range of ports")]
-    ports: String,
+fn init_progress_bar() -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.enable_steady_tick(Duration::from_millis(100));
+    pb.set_style(ProgressStyle::with_template("{spinner} {msg}").unwrap());
+    pb.set_message("Scanning ports...");
+    pb
 }
 
-
-
-fn map_ports(ports_str: String) -> Option<Vec<u16>> {
-    let (start, end) = ports_str.split_once("-")?;
-    
-    let start: u16 = start.parse().ok()?;
-    let end: u16 = end.parse().ok()?;
-    
-    Some((start..=end).collect())
-}
-
-
-async fn probe(host: &str, port: u16, timeout_ms: u64) -> bool {
-    let addr = format!("{}:{}", host, port);
-    let duration = Duration::from_millis(timeout_ms);
-
-    let result = timeout(duration, TcpStream::connect(&addr)).await;
-    
-    match result{
-        Ok(Ok(_)) => true,
-        _ => false
-    }
-}
-
-
-#[tokio::main]
-async fn main() {
-    
-    // Basic log for error handling 
+fn init_logger() {
     tracing_subscriber::fmt()
         .with_target(false)
         .with_timer(tracing_subscriber::fmt::time::uptime())
         .init();
+}
 
-
-    let pb = Arc::new(ProgressBar::new_spinner());
+#[tokio::main]
+async fn main() {
+    init_logger();
+    let pb = Arc::new(init_progress_bar());
     let args = Args::parse();
-    let host = Arc::new(args.host);
+    let threads = args.threads;
     let timeout_ms = args.timeout;
-    
-    // Log for progress
-    pb.enable_steady_tick(Duration::from_millis(100));
-    pb.set_style(
-        ProgressStyle::with_template("{spinner} {msg}")
-        .unwrap(),
-    );
-    pb.set_message("Scanning ports...");
+    let host = Arc::new(args.host.clone());
 
-
-
-    let ports = match map_ports(args.ports) {
+    let ports = match args.map_ports() {
         Some(p) => p,
         None => {
             error!("Invalid port range. Use format 1-1024");
@@ -84,17 +44,37 @@ async fn main() {
         }
     };
 
-
-    stream::iter(ports)
-        .for_each_concurrent(args.threads as usize, |port| {
+    let results: Vec<(u16, String)> = stream::iter(ports)
+        .map(|port| {
             let host = host.clone();
-            let value = pb.clone();
+            let pb = pb.clone();
             async move {
-                if probe(&host, port, timeout_ms).await {
-                    value.println(format!("OPEN {}", port));
+                let banner = probe(&host, port, timeout_ms).await;
+                if banner.is_some() {
+                    pb.println(format!("OPEN {}", port));
                 }
-
+                (port, banner)
             }
         })
+        .buffer_unordered(threads as usize)
+        .filter_map(|(port, banner)| async move {
+            banner.map(|b| (port, b))
+        })
+        .collect()
         .await;
+
+    let output = results
+        .iter()
+        .map(|(port, banner)| {
+            if banner.is_empty() {
+                format!("OPEN {}", port)
+            } else {
+                format!("OPEN {} | {}", port, banner.trim())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    pb.finish_with_message("Done.");
+    fs::write("results.txt", output).expect("Failed to write results file");
 }
